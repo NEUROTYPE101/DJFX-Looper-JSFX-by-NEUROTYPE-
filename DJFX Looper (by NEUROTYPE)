@@ -1,5 +1,4 @@
-desc:DJFX Looper (by NEUROTYPE)
-// MIT License
+desc:404 DJFX Looper 2.0 FIX (by Neurotype)
 
 slider1:0<-1,1,0.01>Loop Trigger (Left: Long | Right: Short)
 slider2:1<-2,2,0.01>Pitch Speed
@@ -13,20 +12,38 @@ r_pos = 0;
 is_active = 0;
 f_l = 0; f_r = 0;
 fade_s = 44;
-
 peak_env = 0; 
 
-@sample
+// Инициализация новых переменных для мягкого выключения
+fade_active = 0;
+fade_out_pos = 0;
+fade_out_len = 0.010 * srate; // 10 миллисекунд на кроссфейд (идеально для перформанса)
 
+@slider
+base_delay = (slider1 / 1000) * srate;
+// Параметры лупера обновляются на лету
+
+@sample
+// 1. Постоянная запись во входной буфер
 b_l[w_pos] = spl0;
 b_r[w_pos] = spl1;
 
-abs(slider1) < 0.05 ? (
-  is_active = 0;
-  out_l = spl0; out_r = spl1;
+// Проверяем триггер слайдера
+is_trigger_off = (abs(slider1) < 0.05);
+
+// Логика переключения состояний
+is_trigger_off ? (
+  // Если слайдер вернули в 0, но лупер еще работал — запускаем процесс плавного выключения
+  is_active == 1 ? (
+    is_active = 0;
+    fade_active = 1;
+    fade_out_pos = fade_out_len; // Начинаем обратный отсчет сэмплов кроссфейда
+  );
 ) : (
+  // Включение лупера
   is_active == 0 ? (
     is_active = 1;
+    fade_active = 0; // Прерываем хвост выключения, если оно шло
     slider1 > 0 ? (
        t_ms = 10 + (1 - slider1) * 300; 
     ) : (
@@ -36,20 +53,48 @@ abs(slider1) < 0.05 ? (
     start_ptr = (w_pos - loop_len + buf_len) % buf_len;
     r_pos = 0;
   );
+);
 
+// 2. РЕНДЕРИНГ ЗВУКА И КРОССФЕЙД
+(is_active == 1 || fade_active == 1) ? (
+  // Чтение из петли лупера с Питчем
   r_pos += slider2; 
   r_pos >= loop_len ? r_pos = 0;
   r_pos < 0 ? r_pos = loop_len;
 
+  // Мягкое сглаживание краев внутри самой петли
   gain = 1;
   r_pos < fade_s ? gain = r_pos / fade_s;
   r_pos > (loop_len - fade_s) ? gain = (loop_len - r_pos) / fade_s;
 
   idx = (start_ptr + r_pos) % buf_len;
-  out_l = b_l[idx] * gain;
-  out_r = b_r[idx] * gain;
+  loop_out_l = b_l[idx] * gain;
+  loop_out_r = b_r[idx] * gain;
+
+  // Если мы находимся в состоянии затухания эффекта (fade_active)
+  fade_active == 1 ? (
+    // Вычисляем коэффициент пропорции от 0 до 1
+    mix_clean = (fade_out_len - fade_out_pos) / fade_out_len;
+    mix_loop = fade_out_pos / fade_out_len;
+
+    // Смешиваем loop-хвост и чистый входящий сигнал (spl0/spl1)
+    out_l = (loop_out_l * mix_loop) + (spl0 * mix_clean);
+    out_r = (loop_out_r * mix_loop) + (spl1 * mix_clean);
+
+    fade_out_pos -= 1;
+    fade_out_pos <= 0 ? fade_active = 0; // Полностью отключаем обработку петли
+  ) : (
+    // Если эффект просто активно включен
+    out_l = loop_out_l; 
+    out_r = loop_out_r;
+  );
+) : (
+  // Эффект полностью выключен — идет чистый байпас
+  out_l = spl0; 
+  out_r = spl1;
 );
 
+// 3. Фильтр и Выход
 cut = slider3 * slider3;
 f_l += cut * (out_l - f_l);
 f_r += cut * (out_r - f_r);
@@ -57,15 +102,17 @@ f_r += cut * (out_r - f_r);
 w_pos = (w_pos + 1) % buf_len;
 spl0 = f_l; spl1 = f_r;
 
+// 4. Огибающая для графики
 cur_peak = max(abs(spl0), abs(spl1));
 peak_env = cur_peak > peak_env ? cur_peak : peak_env * 0.995;
-
 @gfx 300 300
 
-glitch_trig = rand(100) > 93 ? 1 : 0; 
-gx = glitch_trig ? (rand(8) - 4) : 0; 
-gy = glitch_trig ? (rand(8) - 4) : 0; 
+// Генератор глитчей (срабатывает случайным образом)
+glitch_trig = rand(100) > 93 ? 1 : 0; // Шанс глитча в каждом кадре
+gx = glitch_trig ? (rand(8) - 4) : 0; // Смещение по X
+gy = glitch_trig ? (rand(8) - 4) : 0; // Смещение по Y
 
+// 1. Индустриальный темно-серый фон в духе интерфейсов TE
 gfx_r = 0.08; gfx_g = 0.08; gfx_b = 0.08; gfx_a = 1;
 gfx_rect(0, 0, gfx_w, gfx_h);
 
@@ -73,35 +120,43 @@ cx = gfx_w / 2;
 cy = gfx_h / 2;
 base_radius = min(gfx_w, gfx_h) * 0.25;
 
+// Пульсация
 pulse = peak_env * 18;
 r_current = base_radius + pulse;
 
+// 2. Внешнее строгое белое кольцо со смещением глитча
 gfx_r = 0.95; gfx_g = 0.95; gfx_b = 0.95; gfx_a = 1;
 gfx_circle(cx + gx, cy + gy, r_current + 5, 1, 1);
 
+// 3. Темно-серая база самого "экрана"
 gfx_r = 0.12; gfx_g = 0.12; gfx_b = 0.12; gfx_a = 1;
 gfx_circle(cx + gx, cy + gy, r_current, 1, 1);
 
+// 4. Плавные, тягучие переливы (скорость t уменьшена)
 t = time_precise() * 0.35; 
 
+// Ярко-оранжевый акцент (фирменный цвет TE)
 gfx_r = 1.0; gfx_g = 0.33; gfx_b = 0.0; gfx_a = 0.45;
 ofs_x1 = sin(t * 1.2) * r_current * 0.3;
 ofs_y1 = cos(t * 0.8) * r_current * 0.3;
 gfx_circle(cx + gx + ofs_x1, cy + gy + ofs_y1, r_current * 0.65, 1, 1);
 
+// Холодный бирюзовый/циан для техничного контраста
 gfx_r = 0.0; gfx_g = 0.6; gfx_b = 0.8; gfx_a = 0.35;
 ofs_x2 = cos(t * 0.9) * r_current * 0.35;
 ofs_y2 = sin(t * 1.1) * r_current * 0.35;
 gfx_circle(cx + gx + ofs_x2, cy + gy + ofs_y2, r_current * 0.7, 1, 1);
 
+// 5. Визуальный артефакт (горизонтальная полоса развертки) при глитче
 glitch_trig == 1 ? (
     gfx_r = 1; gfx_g = 1; gfx_b = 1; gfx_a = 0.15;
     band_y = cy - r_current + rand(r_current * 2);
     gfx_rect(cx - r_current, band_y, r_current * 2, rand(4) + 1);
 );
 
+// 6. Надпись 404 с хроматической аберрацией
 is_active == 1 ? (
-    
+    // Используем строгий шрифт, типичный для дисплеев оборудования
     gfx_setfont(1, "Arial", r_current * 0.8, 'b'); 
     str = "404";
     gfx_measurestr(str, str_w, str_h);
@@ -109,18 +164,20 @@ is_active == 1 ? (
     bx = cx - str_w / 2;
     by = cy - str_h / 2;
 
+    // Расслоение цветов (хроматическая аберрация) во время глитча
     glitch_trig == 1 ? (
         // Красный канал съезжает влево
         gfx_r = 1; gfx_g = 0; gfx_b = 0; gfx_a = 0.8;
         gfx_x = bx - 4 + gx; gfx_y = by + gy;
         gfx_drawstr(str);
         
-        
+        // Циан канал съезжает вправо
         gfx_r = 0; gfx_g = 1; gfx_b = 1; gfx_a = 0.8;
         gfx_x = bx + 4 + gx; gfx_y = by + gy;
         gfx_drawstr(str);
     );
     
+    // Основной четкий белый текст
     gfx_r = 1; gfx_g = 1; gfx_b = 1; gfx_a = 1;
     // При глитче текст тоже слегка дергается по осям
     gfx_x = bx + gx; 
